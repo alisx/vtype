@@ -3,7 +3,8 @@ Description=vtype 流式语音输入（千问实时 ASR）
 After=graphical-session.target
 
 [Service]
-Environment=DASHSCOPE_API_KEY=sk-在这里填你的百炼Key
+# API Key 放在 %h/.config/vtype/env 里（格式：DASHSCOPE_API_KEY=sk-xxx）
+EnvironmentFile=-%h/.config/vtype/env
 ExecStart=%h/Project/interesting/vtype/.venv/bin/python %h/Project/interesting/vtype/vtype.py
 Restart=on-failure
 
