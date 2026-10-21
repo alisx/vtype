@@ -1,0 +1,2 @@
+dashscope>=1.25.6
+evdev>=1.6

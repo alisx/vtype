@@ -1,0 +1,11 @@
+[Unit]
+Description=vtype 流式语音输入（千问实时 ASR）
+After=graphical-session.target
+
+[Service]
+Environment=DASHSCOPE_API_KEY=sk-在这里填你的百炼Key
+ExecStart=%h/Project/interesting/vtype/.venv/bin/python %h/Project/interesting/vtype/vtype.py
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
