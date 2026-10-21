@@ -28,9 +28,18 @@
 
 ## 安装
 
+一键安装（Ubuntu 24.04+，自动装系统依赖、编译 dotool、加用户组、建 venv）：
+
+```bash
+git clone https://github.com/alisx/vtype.git && cd vtype
+bash install.sh
+```
+
+装完按提示设置 API Key 即可。如果习惯自己动手，手动步骤如下：
+
 ```bash
 # 1. 系统依赖
-sudo apt install alsa-utils wl-clipboard git golang-go gcc libxkbcommon-dev scdoc
+sudo apt install alsa-utils wl-clipboard git golang-go gcc libxkbcommon-dev scdoc python3-tk
 
 # 2. dotool（Ubuntu 源里没有，从源码编译）
 cd /tmp && git clone https://git.sr.ht/~geb/dotool
@@ -40,7 +49,6 @@ cd dotool && ./build.sh && sudo ./build.sh install
 sudo usermod -aG input $USER
 
 # 4. 本项目依赖
-git clone <本仓库地址> && cd vtype
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
