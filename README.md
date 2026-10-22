@@ -86,7 +86,7 @@ systemctl --user enable --now vtype
 | 按热键没反应 | `groups` 里确认有 `input`；确认已注销重登 |
 | 识别正常但打不进字 | 换 `--paste-key`；终端里默认的 shift+insert 一般可用 |
 | 连接失败警告 | 网络问题，程序会自动重试一次；检查是否能访问 dashscope.aliyuncs.com |
-| 断句太急/太慢 | 调 `vtype.py` 中 `turn_detection_silence_duration_ms`（默认 500ms） |
+| 断句太急/太慢 | 调 `vtype.py` 顶部的 `VAD_SILENCE_MS`（默认 1200ms），改完重启生效 |
 | 看完整事件流 | `--debug` |
 
 ## 注意
