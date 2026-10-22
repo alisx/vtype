@@ -39,6 +39,7 @@ ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
 ASR_MODEL = "qwen3-asr-flash-realtime"
 AUDIO_CHUNK = 3200  # 100ms of 16kHz/16bit/mono PCM
 FINISH_TIMEOUT = 30  # 松开后等服务端最终结果的最长时间
+VAD_SILENCE_MS = 1200  # 静音多久算一句话说完（太小会把自然停顿切成碎句，满屏句号）
 
 
 # ---------------------------------------------------------------- 悬浮预览窗
@@ -334,7 +335,7 @@ class AsrSession:
                 enable_turn_detection=True,
                 turn_detection_type="server_vad",
                 turn_detection_threshold=0.2,
-                turn_detection_silence_duration_ms=500,
+                turn_detection_silence_duration_ms=VAD_SILENCE_MS,
                 enable_input_audio_transcription=True,
                 transcription_params=TranscriptionParams(
                     language=self.language,
