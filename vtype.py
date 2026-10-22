@@ -277,15 +277,16 @@ class _Callback(OmniRealtimeCallback):
             print(f"[event] {t}")
         if t == "session.updated":
             self.s.ready.set()
+            self.s.status("● 正在听…")
         elif t == "conversation.item.input_audio_transcription.text":
             # 中间结果：只更新内存和预览窗，不上屏
             self.s.current = resp.get("text", "") + resp.get("stash", "")
-            self.s.overlay.show(self.s.current, owner=self.s)
+            self.s.overlay.show(self.s.current or "● 正在听…", owner=self.s)
         elif t == "conversation.item.input_audio_transcription.completed":
-            # 定稿：一次性提交到输入框
+            # 定稿：一次性提交到输入框；会话还在继续，预览窗回到"正在听"
             self.s.current = ""
             self.s.commit_transcript(resp.get("transcript", ""))
-            self.s.overlay.hide(owner=self.s)
+            self.s.status("● 正在听…")
         elif t == "session.finished":
             self.s.finished.set()
         elif t == "error":
@@ -324,8 +325,13 @@ class AsrSession:
         self.renderer.commit(transcript, owner=self)
         self.committed += transcript
 
+    def status(self, text):
+        """在预览窗显示状态信息（连接中/正在听/收尾中/异常）。"""
+        self.overlay.show(text, owner=self)
+
     def run(self):
         self.renderer.acquire(self)
+        self.status("● 连接中…")
         self.recorder.start()
         threading.Thread(target=self._sender, daemon=True).start()
         try:
@@ -350,7 +356,10 @@ class AsrSession:
                     end_sent = True
                     if not self.ready.is_set():
                         print("\n[警告] 会话未就绪，本次识别取消", file=sys.stderr)
+                        self.status("⚠ 连接超时，本次识别取消")
+                        time.sleep(2.5)  # 让用户来得及看到
                         break
+                    self.status("○ 收尾中…")
                     self._sender_done.wait(timeout=5)  # 把剩余音频发完
                     try:
                         self.conversation.end_session_async()
@@ -360,10 +369,14 @@ class AsrSession:
                         break
                 if end_deadline and time.time() > end_deadline:
                     print("\n[警告] 等待最终结果超时", file=sys.stderr)
+                    self.status("⚠ 等待结果超时，已提交内容保留")
+                    time.sleep(2.5)
                     break
         except Exception as e:
             print(f"\n[警告] 识别服务连接失败: {e}（本次取消，网络恢复后直接用）",
                   file=sys.stderr)
+            self.status("⚠ 网络异常，本次识别取消")
+            time.sleep(2.5)
         finally:
             try:
                 self.conversation.close()
