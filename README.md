@@ -99,7 +99,7 @@ systemctl --user enable --now vtype
 
 欢迎扫码关注我的公众号，一起交流：
 
-![公众号二维码](docs/qrcode.jpg)
+<img src="docs/qrcode.jpg" width="150" alt="公众号二维码">
 
 ## License
 
