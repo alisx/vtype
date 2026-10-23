@@ -5,6 +5,8 @@
 
 基于阿里云百炼 `qwen3-asr-flash-realtime` 流式语音识别。
 
+![演示](docs/demo.gif)
+
 ## 工作原理
 
 仿照真实输入法的**预编辑 / 提交**模型：
