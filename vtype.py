@@ -62,14 +62,19 @@ class Overlay:
         with self._lock:
             if owner is not None:
                 self._owner = owner
-            self._q.put(text)
+            self._q.put(("text", text))
 
     def hide(self, owner=None):
         with self._lock:
             if owner is not None and owner is not self._owner:
                 return
             self._owner = None
-            self._q.put("")
+            self._q.put(("text", ""))
+
+    def set_clipboard(self, text):
+        """由本进程（常驻 X11 窗口）直接充当剪贴板属主。
+        不再使用 wl-copy：没有新进程、没有驻留进程、没有桥接幽灵窗口。"""
+        self._q.put(("clip", text))
 
     def _run(self):
         try:
@@ -88,12 +93,24 @@ class Overlay:
         label.pack()
         win.withdraw()
         visible = [False]
+        clip_text = [""]
+
+        def serve_primary(offset, maxchars):
+            # 有终端把 shift+insert 映射到 PRIMARY，剪贴板两个选择区都要供
+            o, m = int(offset), int(maxchars)
+            return clip_text[0][o:o + m]
 
         def poll():
             try:
                 while True:
-                    text = self._q.get_nowait()
-                    if text:
+                    kind, text = self._q.get_nowait()
+                    if kind == "clip":
+                        clip_text[0] = text
+                        win.clipboard_clear()          # CLIPBOARD
+                        win.clipboard_append(text)
+                        win.selection_handle(serve_primary, selection="PRIMARY")
+                        win.selection_own(selection="PRIMARY")
+                    elif text:
                         label.configure(text=text)
                         win.update_idletasks()
                         w, h = win.winfo_reqwidth(), win.winfo_reqheight()
@@ -120,28 +137,23 @@ class Renderer:
 
     GNOME/mutter 不提供 virtual-keyboard 和 input-method 协议，
     ydotool 的 Unicode 键位重映射又是 X11 技巧，所以中文只能走剪贴板。
-    针对本机踩过的坑的防护：
-    - 不用 wl-copy -o：系统里有剪贴板监听者会立刻抢读，-o 被它消耗后
-      真正的粘贴目标就取空了（故障根因）
-    - 两次写入之间强制间隔 PASTE_SETTLE 秒：XWayland 下应用异步取数可能
-      耗时数百 ms，间隔过短会覆盖掉它还没取走的内容
-    - 最后一次粘贴后 CLIPBOARD_CLEANUP 秒主动清空剪贴板：回收驻留的
-      wl-copy 进程，避免它在任务栏显形为幽灵窗口
+    剪贴板由 Overlay 的常驻 tkinter 窗口直接充当属主（进程内更新），
+    不再使用 wl-copy，没有新进程、没有驻留进程、没有桥接幽灵窗口。
+    - 两次粘贴之间保留 PASTE_SETTLE 秒：给应用留异步取数的时间窗口
     - dotool 常驻进程：uinput 虚拟键盘只创建一次
     - owner 令牌：只有最近一次按键创建的会话可以提交
     """
 
-    PASTE_SETTLE = 1.2      # 两次剪贴板写入的最小间隔
-    CLIPBOARD_CLEANUP = 2.5  # 最后一次粘贴后多久清空剪贴板
+    PASTE_SETTLE = 0.8  # 两次剪贴板写入的最小间隔
 
-    def __init__(self, paste_key="shift+insert", dry_run=False):
+    def __init__(self, overlay, paste_key="shift+insert", dry_run=False):
+        self.overlay = overlay
         self.owner = None
         self.paste_key = paste_key
         self.dry_run = dry_run
         self._cv = threading.Condition()
         self._pending = []  # [(owner, text)] 提交是追加语义，用队列
         self._dotool_proc = None
-        self._cleanup_timer = None
         self._injecting = False
         threading.Thread(target=self._worker, daemon=True).start()
 
@@ -193,24 +205,10 @@ class Renderer:
                 print(f"\n[警告] 注入失败: {e}", file=sys.stderr)
 
     def _paste(self, text):
-        if self._cleanup_timer:
-            self._cleanup_timer.cancel()
-            self._cleanup_timer = None
-        subprocess.run(["wl-copy", "--", text])        # CLIPBOARD：多数应用
-        subprocess.run(["wl-copy", "-p", "--", text])  # PRIMARY：部分终端的 shift+insert 读这个
-        time.sleep(0.1)  # 等剪贴板就绪
+        self.overlay.set_clipboard(text)  # 由常驻 tkinter 窗口充当剪贴板属主
+        time.sleep(0.15)  # 等 tk 事件循环处理剪贴板更新
         self._dotool(f"key {self.paste_key}")
-        time.sleep(self.PASTE_SETTLE - 0.1)  # 给应用留足异步取数时间
-        self._schedule_cleanup()
-
-    def _schedule_cleanup(self):
-        def clear():
-            # 清空选择区，让驻留的 wl-copy 退出（否则它在任务栏显形）
-            subprocess.run(["wl-copy", "-c"])
-            subprocess.run(["wl-copy", "-p", "-c"])
-        self._cleanup_timer = threading.Timer(self.CLIPBOARD_CLEANUP, clear)
-        self._cleanup_timer.daemon = True
-        self._cleanup_timer.start()
+        time.sleep(self.PASTE_SETTLE - 0.15)  # 给应用留足异步取数时间
 
     def _dotool(self, command):
         for _ in range(2):  # 进程挂了重试一次
@@ -361,12 +359,10 @@ class AsrSession:
                         break
                     self.status("○ 收尾中…")
                     self._sender_done.wait(timeout=5)  # 把剩余音频发完
-                    try:
-                        self.conversation.end_session_async()
-                        end_deadline = time.time() + FINISH_TIMEOUT
-                    except Exception as e:
-                        print(f"\n[警告] 会话收尾异常: {e}", file=sys.stderr)
-                        break
+                    # 收尾的网络写操作放独立线程：网络死掉时 send 可能永久阻塞，
+                    # 绝不能因此让会话退不出（否则浮窗常挂、文字丢失）
+                    threading.Thread(target=self._end_async_safe, daemon=True).start()
+                    end_deadline = time.time() + FINISH_TIMEOUT
                 if end_deadline and time.time() > end_deadline:
                     print("\n[警告] 等待最终结果超时", file=sys.stderr)
                     self.status("⚠ 等待结果超时，已提交内容保留")
@@ -378,17 +374,26 @@ class AsrSession:
             self.status("⚠ 网络异常，本次识别取消")
             time.sleep(2.5)
         finally:
-            try:
-                self.conversation.close()
-            except Exception:
-                pass
+            threading.Thread(target=self._close_safe, daemon=True).start()
             self.recorder.stop()
-            # 兜底：定稿了但因故没提交的部分补提交，不丢字
-            missing = self.finals[len(self.committed):]
+            # 兜底：没提交的部分（包括没等到定稿的当前句）补提交，不丢字
+            missing = (self.finals + self.current)[len(self.committed):]
             if missing:
                 self.renderer.commit(missing, owner=self)
             self.overlay.hide(owner=self)
             self.done.set()
+
+    def _end_async_safe(self):
+        try:
+            self.conversation.end_session_async()
+        except Exception:
+            pass
+
+    def _close_safe(self):
+        try:
+            self.conversation.close()
+        except Exception:
+            pass
 
     def _connect(self):
         """连接识别服务，网络抖动时自动重试一次。"""
@@ -511,8 +516,8 @@ def main():
     p.add_argument("--debug", action="store_true", help="打印所有 ASR 事件和 SDK 日志")
     args = p.parse_args()
 
-    renderer = Renderer(paste_key=args.paste_key, dry_run=args.dry_run)
     overlay = Overlay()
+    renderer = Renderer(overlay, paste_key=args.paste_key, dry_run=args.dry_run)
 
     if args.test_injection:
         test_injection(renderer, overlay)
