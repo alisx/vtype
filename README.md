@@ -12,6 +12,7 @@
 仿照真实输入法的**预编辑 / 提交**模型：
 
 - 说话时的中间结果（会自我修正的部分）只进内存，显示在屏幕底部的**悬浮预览窗**——
+  多屏时自动跟随焦点窗口所在的显示器（取不到焦点时跟鼠标指针）
   你能实时看到识别和调整的过程
 - 一句话定稿后才一次性粘贴进输入框，**只追加、不退格**，
   从机制上杜绝重复、错删、重叠
@@ -65,7 +66,8 @@ export DASHSCOPE_API_KEY="sk-你的百炼Key"
 选项：
 
 ```bash
-.venv/bin/python vtype.py --key PAUSE        # 笔记本没有 ScrollLock 键时，用 Pause（Fn+P）
+.venv/bin/python vtype.py --key PAUSE        # 笔记本没有 ScrollLock 键时，用 Pause（Fn+P，点按一下开始、再按一下结束）
+.venv/bin/python vtype.py --key SCROLLLOCK --key PAUSE   # 内外键盘都响应：可重复指定多个热键
 .venv/bin/python vtype.py --key F9           # 换热键
 .venv/bin/python vtype.py --paste-key ctrl+v # 个别应用不认 shift+insert 时用
 .venv/bin/python vtype.py --test-injection   # 只测文字注入和预览窗（不用说话）

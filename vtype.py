@@ -44,6 +44,54 @@ VAD_SILENCE_MS = 1200  # 静音多久算一句话说完（太小会把自然停�
 
 # ---------------------------------------------------------------- 悬浮预览窗
 
+_atspi = {"tried": False, "ok": False, "Atspi": None}
+
+def focus_window_rect():
+    """AT-SPI 无障碍接口查询全局焦点窗口的屏幕坐标。
+
+    GNOME Wayland 下其他进程拿不到焦点窗口位置（Shell.Eval 被禁、
+    X 层 _NET_ACTIVE_WINDOW 对原生 Wayland 窗口为空），AT-SPI 是唯一通道。
+    依赖系统 python3-gi + gir1.2-atspi-2.0；venv 没装就借系统 dist-packages。
+    不可用时返回 None，调用方回退到鼠标指针定位。
+    """
+    if not _atspi["tried"]:
+        _atspi["tried"] = True
+        try:
+            import gi
+        except ImportError:
+            sys.path.append("/usr/lib/python3/dist-packages")
+            try:
+                import gi
+            except ImportError:
+                return None
+        try:
+            gi.require_version("Atspi", "2.0")
+            from gi.repository import Atspi
+            Atspi.init()
+            _atspi["Atspi"] = Atspi
+            _atspi["ok"] = True
+        except Exception:
+            return None
+    if not _atspi["ok"]:
+        return None
+    Atspi = _atspi["Atspi"]
+    try:
+        desktop = Atspi.get_desktop(0)
+        for i in range(desktop.get_child_count()):
+            app = desktop.get_child_at_index(i)
+            for j in range(app.get_child_count()):
+                try:
+                    w = app.get_child_at_index(j)
+                    if w.get_state_set().contains(Atspi.StateType.ACTIVE):
+                        e = w.get_component_iface().get_extents(Atspi.CoordType.SCREEN)
+                        return (e.x, e.y, e.width, e.height)
+                except Exception:
+                    continue
+    except Exception:
+        return None
+    return None
+
+
 class Overlay:
     """预编辑悬浮窗：显示正在识别、尚未定稿的文字。
 
@@ -81,7 +129,13 @@ class Overlay:
             import tkinter as tk
         except ImportError:
             return
-        root = tk.Tk()
+        while True:
+            try:
+                root = tk.Tk()
+                break
+            except tk.TclError:
+                # 图形会话还没就绪（开机自启早于 DISPLAY 导入），2 秒后重试
+                time.sleep(2)
         root.withdraw()
         win = tk.Toplevel(root)
         win.overrideredirect(True)
@@ -94,6 +148,51 @@ class Overlay:
         win.withdraw()
         visible = [False]
         clip_text = [""]
+        monitors = {"t": 0.0, "list": []}  # xrandr 输出缓存，5 秒有效
+
+        def monitor_list():
+            if time.monotonic() - monitors["t"] < 5:
+                return monitors["list"]
+            out = []
+            try:
+                import re, subprocess
+                txt = subprocess.run(["xrandr", "--query"], capture_output=True,
+                                     text=True, timeout=2).stdout
+                for m in re.finditer(r" connected(?: primary)? (\d+)x(\d+)\+(\d+)\+(\d+)", txt):
+                    w, h, x, y = (int(g) for g in m.groups())
+                    out.append((x, y, w, h))
+            except Exception:
+                pass
+            if not out:  # 退路：整块 X 屏幕
+                out = [(0, 0, win.winfo_screenwidth(), win.winfo_screenheight())]
+            monitors["t"] = time.monotonic()
+            monitors["list"] = out
+            return out
+
+        def focused_monitor():
+            # 优先跟焦点窗口（输入光标所在），取不到再跟鼠标指针；0.5 秒内缓存
+            now = time.monotonic()
+            if now - focused_monitor.t < 0.5 and focused_monitor.mon:
+                return focused_monitor.mon
+            focused_monitor.t = now
+            rect = focus_window_rect()
+            if rect:
+                cx, cy = rect[0] + rect[2] // 2, rect[1] + rect[3] // 2
+            else:
+                cx, cy = win.winfo_pointerx(), win.winfo_pointery()
+            for m in monitor_list():
+                x, y, mw, mh = m
+                if x <= cx < x + mw and y <= cy < y + mh:
+                    focused_monitor.mon = m
+                    return m
+            focused_monitor.mon = monitor_list()[0]
+            return focused_monitor.mon
+        focused_monitor.t = 0.0
+        focused_monitor.mon = None
+
+        def place(w, h):
+            x, y, mw, mh = focused_monitor()
+            return x + (mw - w) // 2, y + mh - h - 90
 
         def serve_primary(offset, maxchars):
             # 有终端把 shift+insert 映射到 PRIMARY，剪贴板两个选择区都要供
@@ -114,8 +213,7 @@ class Overlay:
                         label.configure(text=text)
                         win.update_idletasks()
                         w, h = win.winfo_reqwidth(), win.winfo_reqheight()
-                        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-                        win.geometry(f"+{(sw - w) // 2}+{sh - h - 90}")
+                        win.geometry("+%d+%d" % place(w, h))
                         if not visible[0]:
                             win.deiconify()
                             visible[0] = True
@@ -124,6 +222,9 @@ class Overlay:
                         visible[0] = False
             except queue.Empty:
                 pass
+            if visible[0]:
+                # 浮窗实时跟随焦点窗口所在显示器（取不到焦点时跟鼠标指针）
+                win.geometry("+%d+%d" % place(win.winfo_reqwidth(), win.winfo_reqheight()))
             root.after(60, poll)
 
         root.after(60, poll)
@@ -449,7 +550,9 @@ class AsrSession:
 
 # ---------------------------------------------------------------- 热键
 
-def find_key_devices(key_code):
+TAP_MAX = 0.4  # 秒：短按视为点按切换（Pause 等键按下即自发松开，天然落入此分支）
+
+def find_key_devices(key_codes):
     devices = []
     for path in evdev.list_devices():
         try:
@@ -457,35 +560,71 @@ def find_key_devices(key_code):
         except OSError:
             continue
         caps = dev.capabilities()
-        if evdev.ecodes.EV_KEY in caps and key_code in caps[evdev.ecodes.EV_KEY]:
+        if evdev.ecodes.EV_KEY in caps and any(k in caps[evdev.ecodes.EV_KEY] for k in key_codes):
             devices.append(dev)
     return devices
 
 
-def hotkey_loop(key_code, renderer, overlay, language, debug=False):
-    devices = find_key_devices(key_code)
+def hotkey_loop(key_codes, renderer, overlay, language, debug=False):
+    devices = find_key_devices(key_codes)
     if not devices:
         sys.exit("找不到能按下该热键的输入设备（确认在 input 组且已重新登录）")
-    print(f"监听热键设备: {', '.join(d.name for d in devices)}")
+    print(f"监听热键设备: {', '.join(d.name for d in devices)}", flush=True)
     recording = None   # 正在录音的会话
     last = None        # 上一次会话（可能还在后台收尾）
+    pressed_at = None  # 当前按下的时刻
+    tapped = False     # 当前会话由点按开启，等下次点按结束
     while True:
-        readable, _, _ = select.select(devices, [], [])
+        if not devices:  # 键盘全部拔出，等重新插入
+            time.sleep(1.0)
+            devices = find_key_devices(key_codes)
+            continue
+        readable, _, _ = select.select(devices, [], [], 2.0)
+        if not readable:
+            # 周期性热插拔扫描：新插入的键盘加入监听
+            current = {d.path for d in devices}
+            for d in find_key_devices(key_codes):
+                if d.path not in current:
+                    print(f"热键设备上线: {d.name}", flush=True)
+                    devices.append(d)
+            continue
         for dev in readable:
-            for event in dev.read():
-                if event.type != evdev.ecodes.EV_KEY or event.code != key_code:
+            try:
+                events = dev.read()
+            except OSError:  # 设备被拔出
+                print(f"热键设备掉线: {dev.name}", flush=True)
+                devices.remove(dev)
+                continue
+            for event in events:
+                if event.type != evdev.ecodes.EV_KEY or event.code not in key_codes:
                     continue
-                if event.value == 1 and recording is None:  # 按下
-                    if last is not None and not last.done.is_set():
-                        last.abort()
-                    print("● 录音中...", flush=True)
-                    recording = AsrSession(renderer, overlay, language, debug=debug)
-                    threading.Thread(target=recording.run, daemon=True).start()
-                elif event.value == 0 and recording is not None:  # 松开
-                    print("○ 松手，后台收尾中...", flush=True)
-                    recording.stop()
-                    last = recording
-                    recording = None
+                if event.value == 1:  # 按下
+                    if recording is None:
+                        if last is not None and not last.done.is_set():
+                            last.abort()
+                        print("● 录音中...", flush=True)
+                        recording = AsrSession(renderer, overlay, language, debug=debug)
+                        threading.Thread(target=recording.run, daemon=True).start()
+                        pressed_at = time.monotonic()
+                        tapped = False
+                    elif tapped:
+                        print("○ 再次点按，后台收尾中...", flush=True)
+                        recording.stop()
+                        last = recording
+                        recording = None
+                        tapped = False
+                elif event.value == 0 and recording is not None and pressed_at is not None:  # 松开
+                    held = time.monotonic() - pressed_at
+                    pressed_at = None
+                    if held < TAP_MAX:
+                        # 短按（或 Pause 这类按下即自发松开的键）→ 点按模式，保持录音
+                        tapped = True
+                        print("● 点按模式：再按一次热键结束", flush=True)
+                    else:
+                        print("○ 松手，后台收尾中...", flush=True)
+                        recording.stop()
+                        last = recording
+                        recording = None
 
 
 # ---------------------------------------------------------------- 入口
@@ -507,7 +646,8 @@ def test_injection(renderer, overlay):
 
 def main():
     p = argparse.ArgumentParser(description="按住热键说话的流式语音输入（千问实时 ASR）")
-    p.add_argument("--key", default="SCROLLLOCK", help="热键名，如 SCROLLLOCK、F9、F13")
+    p.add_argument("--key", action="append", default=None,
+                   help="热键名，如 SCROLLLOCK、PAUSE、F9；可重复指定多个，默认 SCROLLLOCK")
     p.add_argument("--language", default="zh", help="识别语言（zh/yue/en/ja...）")
     p.add_argument("--paste-key", default="shift+insert",
                    help="粘贴快捷键；shift+insert 通吃终端和 GUI，备选 ctrl+v / ctrl+shift+v")
@@ -533,14 +673,18 @@ def main():
         sys.exit("请先设置环境变量 DASHSCOPE_API_KEY（阿里云百炼的 sk- 开头 Key）")
     dashscope.api_key = api_key
 
-    key_name = args.key if args.key.startswith("KEY_") else "KEY_" + args.key
-    key_code = evdev.ecodes.ecodes.get(key_name)
-    if key_code is None:
-        sys.exit(f"未知按键名: {args.key}")
+    key_names = args.key or ["SCROLLLOCK"]
+    key_codes = []
+    for name in key_names:
+        full = name if name.startswith("KEY_") else "KEY_" + name
+        code = evdev.ecodes.ecodes.get(full)
+        if code is None:
+            sys.exit(f"未知按键名: {name}")
+        key_codes.append(code)
 
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
-    print(f"就绪：按住 {args.key} 说话，松开出字（Ctrl+C 退出）")
-    hotkey_loop(key_code, renderer, overlay, args.language, debug=args.debug)
+    print(f"就绪：按住 {'/'.join(key_names)} 说话，松开出字；短按一下则再按一次结束（Ctrl+C 退出）", flush=True)
+    hotkey_loop(key_codes, renderer, overlay, args.language, debug=args.debug)
 
 
 if __name__ == "__main__":
