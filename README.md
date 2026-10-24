@@ -65,6 +65,7 @@ export DASHSCOPE_API_KEY="sk-你的百炼Key"
 选项：
 
 ```bash
+.venv/bin/python vtype.py --key PAUSE        # 笔记本没有 ScrollLock 键时，用 Pause（Fn+P）
 .venv/bin/python vtype.py --key F9           # 换热键
 .venv/bin/python vtype.py --paste-key ctrl+v # 个别应用不认 shift+insert 时用
 .venv/bin/python vtype.py --test-injection   # 只测文字注入和预览窗（不用说话）
