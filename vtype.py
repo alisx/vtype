@@ -130,11 +130,24 @@ class Overlay:
         except ImportError:
             return
         while True:
+            # systemd 用户服务可能早于图形会话启动：进程环境在 exec 时定格，
+            # DISPLAY 永远不会自己出现，每次重试前从 systemd 用户管理器同步
+            try:
+                import subprocess
+                out = subprocess.run(["systemctl", "--user", "show-environment"],
+                                     capture_output=True, text=True, timeout=2).stdout
+                for line in out.splitlines():
+                    if line.startswith(("DISPLAY=", "WAYLAND_DISPLAY=", "XAUTHORITY=")):
+                        k, _, v = line.partition("=")
+                        if v:
+                            os.environ[k] = v
+            except Exception:
+                pass
             try:
                 root = tk.Tk()
                 break
             except tk.TclError:
-                # 图形会话还没就绪（开机自启早于 DISPLAY 导入），2 秒后重试
+                # 图形会话还没就绪，2 秒后重试
                 time.sleep(2)
         root.withdraw()
         win = tk.Toplevel(root)
@@ -590,7 +603,7 @@ def hotkey_loop(key_codes, renderer, overlay, language, debug=False):
             continue
         for dev in readable:
             try:
-                events = dev.read()
+                events = list(dev.read())  # read() 是生成器，拔出的 OSError 在迭代时才抛
             except OSError:  # 设备被拔出
                 print(f"热键设备掉线: {dev.name}", flush=True)
                 devices.remove(dev)
